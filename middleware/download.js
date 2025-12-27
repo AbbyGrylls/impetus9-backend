@@ -16,19 +16,26 @@ END:VCARD
 
 const handleDownload = async (req, res) => {
     try {
-        const { eventName,coordsValue, coordinatorName, passkey } = req.body;
+        const { eventName, coordsValue, coordinatorName, passkey } = req.body;
 
-        // 1. Verify Passkey
-        const envKey = `PASSKEY_${coordsValue.toUpperCase()}`;
-        if (!process.env[envKey] || process.env[envKey] !== passkey) {
-            return res.status(401).json({ error: "Invalid Passkey" });
+        // --- STEP 1: Identify User Role (Admin vs Coordinator) ---
+        // Check if a Master Key is set in env and if the provided passkey matches it
+        const masterKey = process.env.PASSKEY_MASTER;
+        const isAdmin = (masterKey && passkey === masterKey);
+
+        // If NOT Admin, strictly verify the specific Event Passkey
+        if (!isAdmin) {
+            const envKey = `PASSKEY_${coordsValue.toUpperCase()}`;
+            if (!process.env[envKey] || process.env[envKey] !== passkey) {
+                return res.status(401).json({ error: "Invalid Passkey" });
+            }
         }
 
+        // Fetch all registrations for the event
         const registrations = await registerModel.find({ eventName })
             .sort({ createdAt: -1 })
             .lean();
 
-        // --- NEW CHECK: If no data found, stop here ---
         if (!registrations || registrations.length === 0) {
             return res.status(200).json({ 
                 success: false, 
@@ -36,44 +43,57 @@ const handleDownload = async (req, res) => {
             });
         }
 
-        // 2. ATOMIC LOCK CHECK
+        // --- STEP 2: Ensure Log Entry Exists ---
+        // We ensure the document exists so we don't get null errors later
         let existingLog = await CoordinatorLog.findOne({ eventName });
         if (!existingLog) {
             try {
                 existingLog = await CoordinatorLog.create({ eventName });
             } catch (e) {
+                // Handle potential race condition if created between find and create
                 existingLog = await CoordinatorLog.findOne({ eventName });
             }
         }
 
+        // --- STEP 3: Handle Locking Logic (Branching) ---
         let isFirstDownload = false;
         let logDetails = existingLog;
 
-        const lockResult = await CoordinatorLog.findOneAndUpdate(
-            { eventName: eventName, vCardsDownloaded: false },
-            { 
-                $set: { 
-                    vCardsDownloaded: true, 
-                    firstDownloaderName: coordinatorName,
-                    downloadTime: new Date()
-                }
-            },
-            { new: true }
-        );
-
-        if (lockResult) {
-            isFirstDownload = true;
-            logDetails = lockResult;
-        } else {
-            isFirstDownload = false;
+        if (isAdmin) {
+            // === ADMIN PATH (GHOST MODE) ===
+            // 1. Do NOT update the database.
+            // 2. Do NOT claim the lock.
+            // 3. Just read the current state to inform the admin.
+            isFirstDownload = false; // Admin is never the "first" in the DB sense
             logDetails = await CoordinatorLog.findOne({ eventName });
-        };
+        } else {
+            // === COORDINATOR PATH (STANDARD LOGIC) ===
+            // Attempt to claim the lock (change vCardsDownloaded from false -> true)
+            const lockResult = await CoordinatorLog.findOneAndUpdate(
+                { eventName: eventName, vCardsDownloaded: false },
+                { 
+                    $set: { 
+                        vCardsDownloaded: true, 
+                        firstDownloaderName: coordinatorName,
+                        downloadTime: new Date()
+                    }
+                },
+                { new: true } // Return the updated document if successful
+            );
 
-        // 4. EXCEL GENERATION
+            if (lockResult) {
+                isFirstDownload = true; // Success! This coordinator claimed the lock.
+                logDetails = lockResult;
+            } else {
+                isFirstDownload = false; // Failed, someone else already took it.
+                logDetails = await CoordinatorLog.findOne({ eventName });
+            }
+        }
+
+        // --- STEP 4: EXCEL GENERATION (Shared by both) ---
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Participants');
 
-        // A. Determine Max Team Size
         let maxTeamMembers = 0;
         registrations.forEach(reg => {
             if (reg.teamMembers && reg.teamMembers.length > maxTeamMembers) {
@@ -81,7 +101,6 @@ const handleDownload = async (req, res) => {
             }
         });
 
-        // B. Define Columns
         const columns = [
             { header: 'Team Name', key: 'teamName', width: 25 },
             { header: 'Captain Name', key: 'capName', width: 20 },
@@ -99,7 +118,6 @@ const handleDownload = async (req, res) => {
 
         worksheet.columns = columns;
 
-        // C. Add Data Rows (FIXED MAPPING HERE)
         registrations.forEach(reg => {
             let rowData = {
                 teamName: reg.teamName,
@@ -113,29 +131,40 @@ const handleDownload = async (req, res) => {
             if (reg.teamMembers && Array.isArray(reg.teamMembers)) {
                 reg.teamMembers.forEach((member, index) => {
                     const i = index + 1;
-                    // UPDATED: Using memName, memRoll, memPhone to match your Schema
                     rowData[`m${i}Name`] = member.memName || '-';
                     rowData[`m${i}Roll`] = member.memRoll || '-';
                     rowData[`m${i}Phone`] = member.memPhone || '-';
                 });
             }
-
             worksheet.addRow(rowData);
         });
 
-        // Style Header
         worksheet.getRow(1).font = { bold: true };
-
         const buffer = await workbook.xlsx.writeBuffer();
         const base64Excel = buffer.toString('base64');
 
-        // 5. vCard Logic (FIXED MAPPING HERE TOO)
+        // --- STEP 5: vCard & Message Logic ---
         let vCardContent = "";
         let message = "";
 
-        if (isFirstDownload) {
-            message = "You are the first coordinator, You can download both Contacts and the Excel Sheet";
+        // CONDITION: Generate vCards if (User is Admin) OR (User is the First Coordinator)
+        if (isAdmin || isFirstDownload) {
             
+            // Set the Message
+            if (isAdmin) {
+                // Admin Info Message
+                if (logDetails.vCardsDownloaded) {
+                    const timeStr = new Date(logDetails.downloadTime).toLocaleString();
+                    message = `ADMIN MODE: Retrieved all data. (Note: Originally downloaded by ${logDetails.firstDownloaderName} at ${timeStr})`;
+                } else {
+                    message = "ADMIN MODE: Retrieved all data. (Status: Not yet downloaded by any coordinator)";
+                }
+            } else {
+                // Coordinator Success Message
+                message = "You are the first coordinator, You can download both Contacts and the Excel Sheet";
+            }
+
+            // Generate the cards
             registrations.forEach(reg => {
                 const prefix = eventName.substring(0, 2).toLowerCase();
                 let uniqueId;
@@ -147,7 +176,6 @@ const handleDownload = async (req, res) => {
                 }
                 vCardContent += generateVCard(reg.capName, reg.capPhone, `${uniqueId}-1`);
                 
-                // UPDATED: Check for memPhone and memName
                 if (reg.teamMembers && reg.teamMembers[0] && reg.teamMembers[0].memPhone) {
                     vCardContent += generateVCard(
                         reg.teamMembers[0].memName, 
@@ -156,7 +184,9 @@ const handleDownload = async (req, res) => {
                     );
                 }
             });
+
         } else {
+            // Coordinator Failure Message (Late)
             const timeStr = new Date(logDetails.downloadTime).toLocaleString();
             message = `⚠ Alert : Contacts were ALREADY downloaded by *${logDetails.firstDownloaderName}*, At ${timeStr}.`;
         }
@@ -165,7 +195,7 @@ const handleDownload = async (req, res) => {
             success: true,
             message: message,
             excelBase64: base64Excel,
-            vcf: isFirstDownload ? vCardContent : null
+            vcf: (isAdmin || isFirstDownload) ? vCardContent : null
         });
 
     } catch (err) {
