@@ -5,6 +5,7 @@ const cors=require('cors')
 const helmet=require('helmet');
 const regisRoutes=require('./routes/registers')
 const coordinatorRoutes=require('./routes/coordsLog')
+const statusRoute=require('./routes/checkStatus')
 const app = express()
 app.use(helmet());
 app.use(cors({
@@ -19,6 +20,7 @@ app.use((req,res,next)=>{
 })
 app.use('/api/register',regisRoutes)
 app.use('/api/coordinator',coordinatorRoutes);
+app.use('/api/checkstatus',statusRoute)
 mongoose.connect(process.env.MONGO_URI)
     .then(()=>{
         app.listen(process.env.PORT,()=>{

@@ -145,15 +145,18 @@ registerSchema.pre("save", async function(next) {
 });
 registerSchema.pre("save", async function (next) {
     if (!this.isNew || this.receiptId) return next();
+    const cleanName=this.eventName.replace(/[^a-zA-Z0-9]/g, "");
+    let prefix=cleanName.substring(0,3).toUpperCase()
+    if(prefix.length<3){
+        prefix=prefix.padEnd(3,'X');
+    }
     let isUnique = false;
     let newId = "";
     while (!isUnique) {
         const randomString = crypto.randomBytes(3).toString('hex').toUpperCase();
-        newId = `IMP-${randomString}`;
+        newId = `${prefix}-${randomString}`;
         const existing = await mongoose.models["registerModel"].findOne({ receiptId: newId });
-        if (!existing) {
-            isUnique = true;
-        }
+        if (!existing) isUnique = true;
     }
     this.receiptId = newId;
     next();
