@@ -40,7 +40,7 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
             deviceFingerprint,
             participantType,
         }=data;
-        const OPEN_EVENTS = ["Photo", "BGMI"]; 
+        const OPEN_EVENTS = ["Photo", "BGMI","IQ Ignition"]; 
 
         if (!OPEN_EVENTS.includes(eventName)) {
             return res.status(400).json({ 
