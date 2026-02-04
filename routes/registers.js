@@ -159,8 +159,17 @@ function prepareRegistrationPayload(req) {
     return payload;
 }
 async function sendTelegramNotification(data) {
-    const BOT_TOKEN = "8501473934:AAHRhNq-Xm8_yv3lmR4bWeMphzxyVeTJq9w";
-    const CHAT_IDS = ["-5277737679","1776531573" ];
+    const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+    if (!BOT_TOKEN) {
+        console.error("❌ Telegram Token is missing in .env file");
+        return;
+    }
+
+    const CHAT_IDS = [
+        process.env.TELEGRAM_GROUP_ID, 
+        process.env.TELEGRAM_ADMIN_ID
+    ].filter(id => id); 
+
     const isExternal = data.participantType === "EXTERNAL";
     const filename = data.paymentScreenshot ? path.basename(data.paymentScreenshot) : 'N/A';
     const header = isExternal 
