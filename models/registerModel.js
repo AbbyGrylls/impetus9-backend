@@ -75,13 +75,16 @@ const registerSchema=new Schema({
     },
     paymentScreenshot: {
         type: String,
-        required: function() { return this.participantType === "EXTERNAL"; }
+        default: null 
     },
     status: {
         type: String,
         enum: ["VERIFIED", "PENDING", "REJECTED"],
         default: function() {
-            return this.participantType === "INTERNAL" ? "VERIFIED" : "PENDING";
+            if (this.participantType === "EXTERNAL" && this.paymentScreenshot) {
+                return "PENDING";
+            }
+            return "VERIFIED";
         }
     },
 },{timestamps:true});

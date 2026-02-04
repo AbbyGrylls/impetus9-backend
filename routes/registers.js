@@ -67,7 +67,7 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
         const register=new registerModel(data);
         await register.save();
         sendTelegramNotification(data).catch(err => console.error("Telegram Error:", err.message));
-        if (participantType === "EXTERNAL") {
+        if (data.participantType === "EXTERNAL" && data.paymentScreenshot) {
             return res.status(201).json({
                 success: true,
                 message: "Registration Submitted for Verification",
@@ -111,53 +111,31 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
 
 module.exports=router;
 function prepareRegistrationPayload(req) {
-    if (req.file) {
+    let payload = { ...req.body };
+    if (typeof payload.teamMembers === 'string') {
         try {
-            const body = req.body;
-            const captainData = body.captain ? JSON.parse(body.captain) : {};
-            const payload = {
-                ...body,
-                ...captainData, // Flatten captain details to top level if necessary
-                teamMembers: body.teamMembers ? JSON.parse(body.teamMembers) : [],
-                paymentScreenshot: req.file.path,
-                participantType: "EXTERNAL"
-            };
-            if (payload.capRoll === "") {
-                payload.capRoll = undefined;
-            }
-            return payload;
+            payload.teamMembers = JSON.parse(payload.teamMembers);
         } catch (e) {
-            throw new Error("Invalid Data Format: Could not parse FormData JSON");
+            payload.teamMembers = []; 
         }
     }
-    const payload = req.body;
-    if (payload.capRoll === "") {
+    if (typeof payload.captain === 'string') {
+        try {
+            const capData = JSON.parse(payload.captain);
+            payload = { ...payload, ...capData };
+        } catch (e) {
+        }
+    }
+    if (req.file) {
+        payload.paymentScreenshot = req.file.path;
+    }
+    if (payload.capRoll === "" || payload.capRoll === "undefined" || payload.capRoll === "null") {
         payload.capRoll = undefined;
     }
+
     return payload;
 }
-function prepareRegistrationPayload(req) {
-    if (req.file) {
-        try {
-            const body = req.body;
-            const captainData = body.captain ? JSON.parse(body.captain) : {};
-            const payload = {
-                ...body,
-                ...captainData, 
-                teamMembers: body.teamMembers ? JSON.parse(body.teamMembers) : [],
-                paymentScreenshot: req.file.path,
-                participantType: "EXTERNAL"
-            };
-            if (payload.capRoll === "") payload.capRoll = undefined;
-            return payload;
-        } catch (e) {
-            throw new Error("Invalid Data Format");
-        }
-    }
-    const payload = req.body;
-    if (payload.capRoll === "") payload.capRoll = undefined;
-    return payload;
-}
+
 async function sendTelegramNotification(data) {
     const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
     if (!BOT_TOKEN) {
