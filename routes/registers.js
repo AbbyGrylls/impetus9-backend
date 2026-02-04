@@ -1,5 +1,6 @@
 const express=require('express')
 const router=express.Router()
+const axios = require('axios');
 const multer = require('multer'); // Added
 const path = require('path'); 
 const fs = require('fs');
@@ -9,14 +10,17 @@ const allowedEvents=require('../allowedEvents')
 
 const uploadDir = 'uploads/';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, 'receipt-' + uniqueSuffix + path.extname(file.originalname));
+        let name = req.body.capName || 'user';
+        let phone = req.body.capPhone || '0000';
+        const shortName = name.replace(/[^a-zA-Z0-9]/g, '').substring(0, 5).toLowerCase();
+        const shortPhone = phone.slice(-4); 
+        const uniqueId = Date.now().toString().slice(-6) + Math.round(Math.random() * 100);
+        cb(null, `${shortPhone}_${shortName}_${uniqueId}${path.extname(file.originalname)}`);
     }
-})
+});
 const upload = multer({ 
     storage: storage,
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -40,13 +44,12 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
             deviceFingerprint,
             participantType,
         }=data;
-        const OPEN_EVENTS = ["Photo", "BGMI","IQ Ignition"]; 
-
+        /* const OPEN_EVENTS = ["Photo", "BGMI","IQ Ignition"]; 
         if (!OPEN_EVENTS.includes(eventName)) {
             return res.status(400).json({ 
                 error: "Registration for this event is not opened." 
             });
-        }
+        } */
         if(!allowedEvents.has(eventName)){
             return res.status(400).json({error:"Invalid Event"})
         }
@@ -63,6 +66,7 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
         //controller
         const register=new registerModel(data);
         await register.save();
+        sendTelegramNotification(data).catch(err => console.error("Telegram Error:", err.message));
         if (participantType === "EXTERNAL") {
             return res.status(201).json({
                 success: true,
@@ -80,9 +84,11 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
 
     }
     catch (err){
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
         if (err.code===11000) {
             console.log("FULL DUPLICATE PATTERN:", err.keyPattern);
-
             const keys = Object.keys(err.keyPattern);
             if (keys.includes('capPhone')) {
                 return res.status(409).json({ error: 'This Phone Number is already registered for this event.' });
@@ -90,7 +96,6 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
             if (keys.includes('capRoll')) {
                 return res.status(409).json({ error: 'This Roll Number is already registered for this event.' });
             }
-
             return res.status(409).json({
                 error: 'Duplicate Registration: This team/captain is already registered.'
             });
@@ -106,16 +111,10 @@ router.post("/",rateLimiter,upload.single('paymentScreenshot'), async(req,res)=>
 
 module.exports=router;
 function prepareRegistrationPayload(req) {
-    // If a file was uploaded, we know it's an External Multipart request
     if (req.file) {
         try {
             const body = req.body;
-            
-            // 1. Parse nested JSON if it exists (e.g. if frontend sends 'captain' object)
-            // If your frontend sends flat fields, this part is optional but good for safety.
             const captainData = body.captain ? JSON.parse(body.captain) : {};
-
-            // 2. Construct the payload
             const payload = {
                 ...body,
                 ...captainData, // Flatten captain details to top level if necessary
@@ -123,23 +122,69 @@ function prepareRegistrationPayload(req) {
                 paymentScreenshot: req.file.path,
                 participantType: "EXTERNAL"
             };
-
-            // 3. CRITICAL FIX: Convert empty strings to undefined for optional unique fields
             if (payload.capRoll === "") {
                 payload.capRoll = undefined;
             }
-
             return payload;
         } catch (e) {
             throw new Error("Invalid Data Format: Could not parse FormData JSON");
         }
     }
-    
-    // For Internal Users
     const payload = req.body;
-    // Good practice to apply the same fix for internal users just in case
     if (payload.capRoll === "") {
         payload.capRoll = undefined;
     }
     return payload;
+}
+function prepareRegistrationPayload(req) {
+    if (req.file) {
+        try {
+            const body = req.body;
+            const captainData = body.captain ? JSON.parse(body.captain) : {};
+            const payload = {
+                ...body,
+                ...captainData, 
+                teamMembers: body.teamMembers ? JSON.parse(body.teamMembers) : [],
+                paymentScreenshot: req.file.path,
+                participantType: "EXTERNAL"
+            };
+            if (payload.capRoll === "") payload.capRoll = undefined;
+            return payload;
+        } catch (e) {
+            throw new Error("Invalid Data Format");
+        }
+    }
+    const payload = req.body;
+    if (payload.capRoll === "") payload.capRoll = undefined;
+    return payload;
+}
+async function sendTelegramNotification(data) {
+    const BOT_TOKEN = "8501473934:AAHRhNq-Xm8_yv3lmR4bWeMphzxyVeTJq9w";
+    const CHAT_IDS = ["-5277737679","1776531573" ];
+    const isExternal = data.participantType === "EXTERNAL";
+    const filename = data.paymentScreenshot ? path.basename(data.paymentScreenshot) : 'N/A';
+    const header = isExternal 
+        ? "🚨 <b>EXTERNAL REGISTRATION (VERIFY PAYMENT)</b> 💰" 
+        : "✅ <b>New Internal Registration</b>";
+
+    const message = `
+${header}
+━━━━━━━━━━━━━━━━━━━
+<b>📌 Event:</b> ${data.eventName}
+<b>🛡️ Team:</b> ${data.teamName}
+<b>👤 Captain:</b> ${data.capName}
+<b>📞 Phone:</b> ${data.capPhone}
+${data.capRoll ? `<b>🎓 Roll:</b> ${data.capRoll}` : ''}
+${isExternal ? `<b>📂 File:</b> ${filename}` : ''}
+━━━━━━━━━━━━━━━━━━━
+`;
+    const promises = CHAT_IDS.map(id => 
+        axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            chat_id: id,
+            text: message,
+            parse_mode: 'HTML'
+        }).catch(err => console.error(`Failed to notify ${id}:`, err.message))
+    );
+
+    await Promise.all(promises);
 }
